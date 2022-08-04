@@ -1,0 +1,1040 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1500" height="844" onload="init(evt)" viewBox="0 0 1500 844" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#ffffff" offset="5%" />
+		<stop stop-color="#ffffff" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Open Sans, sans-serif; font-size:10px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:15px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+	}
+
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+		}
+		else if (e.target.id == "unzoom") unzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+	}, false)
+
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+		return;
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 10 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) {
+				currentSearchTerm = term;
+				search();
+			}
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (currentSearchTerm === null) return;
+		var term = currentSearchTerm;
+
+		var re = new RegExp(term, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1500.0" height="844.0" fill="url(#background)"  />
+<text id="title" x="750.00" y="20" >Flame Graph</text>
+<text id="details" x="10.00" y="829" > </text>
+<text id="unzoom" x="10.00" y="20" class="hide">Reset Zoom</text>
+<text id="search" x="1390.00" y="20" >Search</text>
+<text id="ignorecase" x="1474.00" y="20" >ic</text>
+<text id="matched" x="1390.00" y="829" > </text>
+<g id="frames">
+<g >
+<title>std::unique_ptr&lt;ROOT::Detail::RDF::RColumnReaderBase, std::default_delete&lt;ROOT::Detail::RDF::RColumnReaderBase&gt; &gt;::get (4 samples, 0.007%)</title><rect x="1487.7" y="511" width="0.1" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="1490.72" y="521.5" ></text>
+</g>
+<g >
+<title>TCling::InspectMembers (12 samples, 0.022%)</title><rect x="13.4" y="351" width="0.4" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.44" y="361.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RLoopManager::RunAndCheckFilters (54,356 samples, 99.579%)</title><rect x="14.4" y="639" width="1473.8" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="17.42" y="649.5" >ROOT::Detail::RDF::RLoopManager::RunAndCheckFilters</text>
+</g>
+<g >
+<title>__memmove_avx_unaligned_erms (5 samples, 0.009%)</title><rect x="11.2" y="479" width="0.1" height="15.0" fill="rgb(236,102,102)" rx="2" ry="2" />
+<text  x="14.17" y="489.5" ></text>
+</g>
+<g >
+<title>TStreamerInfo::ReadBuffer&lt;char**&gt; (16 samples, 0.029%)</title><rect x="13.4" y="463" width="0.5" height="15.0" fill="rgb(208,208,62)" rx="2" ry="2" />
+<text  x="16.42" y="473.5" ></text>
+</g>
+<g >
+<title>ROOT::RDF::RResultPtr&lt;double&gt;::GetValue (54,360 samples, 99.586%)</title><rect x="14.4" y="719" width="1473.8" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="17.37" y="729.5" >ROOT::RDF::RResultPtr&lt;double&gt;::GetValue</text>
+</g>
+<g >
+<title>TObjArray::Streamer (30 samples, 0.055%)</title><rect x="13.4" y="543" width="0.8" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="16.42" y="553.5" ></text>
+</g>
+<g >
+<title>TClass::BuildRealData (13 samples, 0.024%)</title><rect x="13.4" y="399" width="0.4" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.42" y="409.5" ></text>
+</g>
+<g >
+<title>_Fork (8 samples, 0.015%)</title><rect x="1489.6" y="767" width="0.3" height="15.0" fill="rgb(238,105,105)" rx="2" ry="2" />
+<text  x="1492.65" y="777.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RAction&lt;ROOT::Internal::RDF::SumHelper&lt;double&gt;, ROOT::Detail::RDF::RLoopManager, ROOT::TypeTraits::TypeList&lt;double&gt; &gt;::Run (54,353 samples, 99.573%)</title><rect x="14.5" y="623" width="1473.7" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="17.50" y="633.5" >ROOT::Internal::RDF::RAction&lt;ROOT::Internal::RDF::SumHelper&lt;double&gt;, ROOT::Detail::RDF::RLoopManager, ROOT::TypeTraits::TypeList&lt;double&gt; &gt;::Run</text>
+</g>
+<g >
+<title>clang::ASTReader::getInputFile (4 samples, 0.007%)</title><rect x="12.0" y="431" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="14.95" y="441.5" ></text>
+</g>
+<g >
+<title>TClass::CreateListOfDataMembers (7 samples, 0.013%)</title><rect x="13.5" y="191" width="0.2" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.47" y="201.5" ></text>
+</g>
+<g >
+<title>TBuildRealData::Inspect (8 samples, 0.015%)</title><rect x="13.4" y="223" width="0.3" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="16.44" y="233.5" ></text>
+</g>
+<g >
+<title>TCling::DataMemberInfo_Factory (4 samples, 0.007%)</title><rect x="13.9" y="255" width="0.1" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.85" y="265.5" ></text>
+</g>
+<g >
+<title>main (54,482 samples, 99.809%)</title><rect x="11.1" y="751" width="1477.1" height="15.0" fill="rgb(219,79,79)" rx="2" ry="2" />
+<text  x="14.06" y="761.5" >main</text>
+</g>
+<g >
+<title>clang::ASTReader::ReadSubmoduleBlock (5 samples, 0.009%)</title><rect x="11.5" y="479" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="14.49" y="489.5" ></text>
+</g>
+<g >
+<title>TBuildRealData::Inspect (12 samples, 0.022%)</title><rect x="13.9" y="447" width="0.3" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="16.85" y="457.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::GetROOT2 (122 samples, 0.224%)</title><rect x="11.1" y="655" width="3.3" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="14.06" y="665.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to clang::ASTReader::FinishedDeserializing() (5 samples, 0.009%)</title><rect x="13.5" y="63" width="0.2" height="15.0" fill="rgb(227,227,69)" rx="2" ry="2" />
+<text  x="16.52" y="73.5" ></text>
+</g>
+<g >
+<title>clang::ModuleMap::parseModuleMapFile (4 samples, 0.007%)</title><rect x="12.9" y="511" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.87" y="521.5" ></text>
+</g>
+<g >
+<title>clang::Lexer::LexTokenInternal (4 samples, 0.007%)</title><rect x="13.0" y="479" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.98" y="489.5" ></text>
+</g>
+<g >
+<title>TClass::CallShowMembers (10 samples, 0.018%)</title><rect x="13.9" y="415" width="0.2" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.85" y="425.5" ></text>
+</g>
+<g >
+<title>TClass::BuildRealData (10 samples, 0.018%)</title><rect x="13.9" y="431" width="0.2" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.85" y="441.5" ></text>
+</g>
+<g >
+<title>TClass::GetDataMember (7 samples, 0.013%)</title><rect x="13.5" y="207" width="0.2" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.47" y="217.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::loadDeclUpdateRecords (4 samples, 0.007%)</title><rect x="13.5" y="31" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="16.52" y="41.5" ></text>
+</g>
+<g >
+<title>clang::Lexer::Lex (5 samples, 0.009%)</title><rect x="12.7" y="479" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.66" y="489.5" ></text>
+</g>
+<g >
+<title>[libz.so.1.2.11] (4 samples, 0.007%)</title><rect x="10.1" y="767" width="0.1" height="15.0" fill="rgb(235,101,101)" rx="2" ry="2" />
+<text  x="13.11" y="777.5" ></text>
+</g>
+<g >
+<title>ROOT::RDF::RInterface&lt;ROOT::Detail::RDF::RLoopManager, void&gt;::DefineImpl&lt;double (*)(unsigned long long), ROOT::Detail::RDF::CustomColExtraArgs::None, double&gt; (122 samples, 0.224%)</title><rect x="11.1" y="703" width="3.3" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="14.06" y="713.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RLoopManager::RunEmptySource (54,359 samples, 99.584%)</title><rect x="14.4" y="655" width="1473.8" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="17.39" y="665.5" >ROOT::Detail::RDF::RLoopManager::RunEmptySource</text>
+</g>
+<g >
+<title>clang::ASTReader::ReadASTBlock (27 samples, 0.049%)</title><rect x="11.2" y="495" width="0.7" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="14.17" y="505.5" ></text>
+</g>
+<g >
+<title>clang::DeclContext::LoadLexicalDeclsFromExternalStorage (4 samples, 0.007%)</title><rect x="13.9" y="191" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="16.85" y="201.5" ></text>
+</g>
+<g >
+<title>use_RDF (54,482 samples, 99.809%)</title><rect x="11.1" y="735" width="1477.1" height="15.0" fill="rgb(231,96,96)" rx="2" ry="2" />
+<text  x="14.06" y="745.5" >use_RDF</text>
+</g>
+<g >
+<title>TBuildRealData::Inspect (4 samples, 0.007%)</title><rect x="13.9" y="319" width="0.1" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="16.85" y="329.5" ></text>
+</g>
+<g >
+<title>clang::ModuleMapParser::parseModuleDecl (4 samples, 0.007%)</title><rect x="12.9" y="479" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.87" y="489.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::ReadASTCore (22 samples, 0.040%)</title><rect x="11.9" y="495" width="0.6" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="14.90" y="505.5" ></text>
+</g>
+<g >
+<title>clang::Lexer::LexTokenInternal (4 samples, 0.007%)</title><rect x="12.7" y="367" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.68" y="377.5" ></text>
+</g>
+<g >
+<title>clang::MultiplexExternalSemaSource::FinishedDeserializing (5 samples, 0.009%)</title><rect x="13.5" y="79" width="0.2" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="16.52" y="89.5" ></text>
+</g>
+<g >
+<title>TClingDataMemberInfo::TClingDataMemberInfo (7 samples, 0.013%)</title><rect x="13.5" y="143" width="0.2" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.47" y="153.5" ></text>
+</g>
+<g >
+<title>TStreamerInfoActions::GenericReadAction (16 samples, 0.029%)</title><rect x="13.4" y="479" width="0.5" height="15.0" fill="rgb(208,208,62)" rx="2" ry="2" />
+<text  x="16.42" y="489.5" ></text>
+</g>
+<g >
+<title>clang::Preprocessor::Lex (4 samples, 0.007%)</title><rect x="13.0" y="511" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.98" y="521.5" ></text>
+</g>
+<g >
+<title>clang::DeclContext::decls_begin (4 samples, 0.007%)</title><rect x="13.9" y="207" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="16.85" y="217.5" ></text>
+</g>
+<g >
+<title>TClass::CallShowMembers (4 samples, 0.007%)</title><rect x="13.9" y="351" width="0.1" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.85" y="361.5" ></text>
+</g>
+<g >
+<title>TClass::BuildRealData (10 samples, 0.018%)</title><rect x="13.4" y="303" width="0.3" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.44" y="313.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RDefine&lt;double (*)(unsigned long long), ROOT::Detail::RDF::CustomColExtraArgs::None&gt;::UpdateHelper&lt;unsigned long long, 0ul&gt; (54,327 samples, 99.526%)</title><rect x="14.9" y="543" width="1473.0" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="17.88" y="553.5" >ROOT::Detail::RDF::RDefine&lt;double (*)(unsigned long long), ROOT::Detail::RDF::CustomColExtraArgs::None&gt;::UpdateHelper&lt;unsigned long long, 0ul&gt;</text>
+</g>
+<g >
+<title>std::unique_ptr&lt;ROOT::Detail::RDF::RColumnReaderBase, std::default_delete&lt;ROOT::Detail::RDF::RColumnReaderBase&gt; &gt;::operator (4 samples, 0.007%)</title><rect x="1487.7" y="527" width="0.1" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="1490.72" y="537.5" ></text>
+</g>
+<g >
+<title>clang::Parser::ConsumeToken (4 samples, 0.007%)</title><rect x="13.0" y="527" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.98" y="537.5" ></text>
+</g>
+<g >
+<title>TClass::CallShowMembers (12 samples, 0.022%)</title><rect x="13.4" y="383" width="0.4" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.44" y="393.5" ></text>
+</g>
+<g >
+<title>calc_x (6,733 samples, 12.335%)</title><rect x="1305.1" y="527" width="182.6" height="15.0" fill="rgb(226,89,89)" rx="2" ry="2" />
+<text  x="1308.12" y="537.5" >calc_x</text>
+</g>
+<g >
+<title>TBufferFile::ReadClassBuffer (28 samples, 0.051%)</title><rect x="13.4" y="511" width="0.8" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="16.42" y="521.5" ></text>
+</g>
+<g >
+<title>clang::Parser::ParseTopLevelDecl (4 samples, 0.007%)</title><rect x="13.0" y="543" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.98" y="553.5" ></text>
+</g>
+<g >
+<title>cling::IncrementalParser::Initialize (5 samples, 0.009%)</title><rect x="13.0" y="575" width="0.1" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="15.98" y="585.5" ></text>
+</g>
+<g >
+<title>do_lookup_x (8 samples, 0.015%)</title><rect x="1489.3" y="767" width="0.2" height="15.0" fill="rgb(245,115,115)" rx="2" ry="2" />
+<text  x="1492.30" y="777.5" ></text>
+</g>
+<g >
+<title>TCling::DataMemberInfo_Factory (7 samples, 0.013%)</title><rect x="13.5" y="159" width="0.2" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.47" y="169.5" ></text>
+</g>
+<g >
+<title>RegisterCxxModules (57 samples, 0.104%)</title><rect x="11.1" y="591" width="1.5" height="15.0" fill="rgb(243,113,113)" rx="2" ry="2" />
+<text  x="14.08" y="601.5" ></text>
+</g>
+<g >
+<title>_dl_start_user (9 samples, 0.016%)</title><rect x="1488.6" y="767" width="0.2" height="15.0" fill="rgb(244,114,114)" rx="2" ry="2" />
+<text  x="1491.56" y="777.5" ></text>
+</g>
+<g >
+<title>TCling::InspectMembers (10 samples, 0.018%)</title><rect x="13.4" y="239" width="0.3" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.44" y="249.5" ></text>
+</g>
+<g >
+<title>TCling::InspectMembers (12 samples, 0.022%)</title><rect x="13.4" y="335" width="0.4" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.44" y="345.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RDefine&lt;double (*)(unsigned long long), ROOT::Detail::RDF::CustomColExtraArgs::None&gt;::Update (54,331 samples, 99.533%)</title><rect x="14.9" y="559" width="1473.0" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="17.85" y="569.5" >ROOT::Detail::RDF::RDefine&lt;double (*)(unsigned long long), ROOT::Detail::RDF::CustomColExtraArgs::None&gt;::Update</text>
+</g>
+<g >
+<title>TClass::CallShowMembers (10 samples, 0.018%)</title><rect x="13.4" y="255" width="0.3" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.44" y="265.5" ></text>
+</g>
+<g >
+<title>cling::IncrementalParser::ParseInternal (4 samples, 0.007%)</title><rect x="13.0" y="559" width="0.1" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="15.98" y="569.5" ></text>
+</g>
+<g >
+<title>TROOT::InitInterpreter (122 samples, 0.224%)</title><rect x="11.1" y="639" width="3.3" height="15.0" fill="rgb(210,210,63)" rx="2" ry="2" />
+<text  x="14.06" y="649.5" ></text>
+</g>
+<g >
+<title>cling::Interpreter::loadModule (55 samples, 0.101%)</title><rect x="11.1" y="559" width="1.5" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="14.11" y="569.5" ></text>
+</g>
+<g >
+<title>[libz.so.1.2.11] (15 samples, 0.027%)</title><rect x="10.2" y="719" width="0.4" height="15.0" fill="rgb(235,101,101)" rx="2" ry="2" />
+<text  x="13.22" y="729.5" ></text>
+</g>
+<g >
+<title>clang::Lexer::LexIdentifier (4 samples, 0.007%)</title><rect x="12.7" y="351" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.68" y="361.5" ></text>
+</g>
+<g >
+<title>cling::Interpreter::DeclareInternal (6 samples, 0.011%)</title><rect x="12.6" y="559" width="0.2" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="15.63" y="569.5" ></text>
+</g>
+<g >
+<title>[libm.so.6] (47,579 samples, 87.163%)</title><rect x="15.1" y="527" width="1290.0" height="15.0" fill="rgb(235,101,101)" rx="2" ry="2" />
+<text  x="18.10" y="537.5" >[libm.so.6]</text>
+</g>
+<g >
+<title>ROOT::RDF::RResultPtr&lt;double&gt;::Get (54,360 samples, 99.586%)</title><rect x="14.4" y="703" width="1473.8" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="17.37" y="713.5" >ROOT::RDF::RResultPtr&lt;double&gt;::Get</text>
+</g>
+<g >
+<title>clang::Lexer::LexTokenInternal (5 samples, 0.009%)</title><rect x="12.7" y="463" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.66" y="473.5" ></text>
+</g>
+<g >
+<title>adler32_z (4 samples, 0.007%)</title><rect x="1488.9" y="767" width="0.2" height="15.0" fill="rgb(240,108,108)" rx="2" ry="2" />
+<text  x="1491.94" y="777.5" ></text>
+</g>
+<g >
+<title>clang::CompilerInstance::loadModule (53 samples, 0.097%)</title><rect x="11.1" y="527" width="1.5" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="14.14" y="537.5" ></text>
+</g>
+<g >
+<title>cling::Interpreter::Interpreter (18 samples, 0.033%)</title><rect x="12.8" y="591" width="0.5" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="15.79" y="601.5" ></text>
+</g>
+<g >
+<title>clang::Lexer::Lex (4 samples, 0.007%)</title><rect x="13.0" y="495" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.98" y="505.5" ></text>
+</g>
+<g >
+<title>_dl_runtime_resolve_xsavec (5 samples, 0.009%)</title><rect x="1488.4" y="767" width="0.2" height="15.0" fill="rgb(244,114,114)" rx="2" ry="2" />
+<text  x="1491.43" y="777.5" ></text>
+</g>
+<g >
+<title>cling::Interpreter::declare (6 samples, 0.011%)</title><rect x="12.6" y="575" width="0.2" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="15.63" y="585.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::ReadControlBlock (22 samples, 0.040%)</title><rect x="11.9" y="479" width="0.6" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="14.90" y="489.5" ></text>
+</g>
+<g >
+<title>std::get&lt;0ul, ROOT::Detail::RDF::RColumnReaderBase*, std::default_delete&lt;ROOT::Detail::RDF::RColumnReaderBase&gt; &gt; (4 samples, 0.007%)</title><rect x="1487.7" y="479" width="0.1" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="1490.72" y="489.5" ></text>
+</g>
+<g >
+<title>_int_malloc (5 samples, 0.009%)</title><rect x="10.7" y="751" width="0.1" height="15.0" fill="rgb(236,103,103)" rx="2" ry="2" />
+<text  x="13.65" y="761.5" ></text>
+</g>
+<g >
+<title>cling::IncrementalParser::IncrementalParser (5 samples, 0.009%)</title><rect x="12.8" y="575" width="0.2" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="15.85" y="585.5" ></text>
+</g>
+<g >
+<title>cling::IncrementalParser::Compile (6 samples, 0.011%)</title><rect x="12.6" y="543" width="0.2" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="15.63" y="553.5" ></text>
+</g>
+<g >
+<title>clang::Preprocessor::Lex (5 samples, 0.009%)</title><rect x="12.7" y="495" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.66" y="505.5" ></text>
+</g>
+<g >
+<title>std::unique_ptr&lt;ROOT::Detail::RDF::RColumnReaderBase, std::default_delete&lt;ROOT::Detail::RDF::RColumnReaderBase&gt; &gt;::operator (6 samples, 0.011%)</title><rect x="1488.0" y="591" width="0.2" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="1490.99" y="601.5" ></text>
+</g>
+<g >
+<title>cling::CIFactory::createCI (5 samples, 0.009%)</title><rect x="12.8" y="559" width="0.2" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="15.85" y="569.5" ></text>
+</g>
+<g >
+<title>TBuildRealData::Inspect (7 samples, 0.013%)</title><rect x="13.9" y="383" width="0.1" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="16.85" y="393.5" ></text>
+</g>
+<g >
+<title>clang::ModuleMapParser::parseModuleMapFile (4 samples, 0.007%)</title><rect x="12.9" y="495" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.87" y="505.5" ></text>
+</g>
+<g >
+<title>TCling::InspectMembers (12 samples, 0.022%)</title><rect x="13.9" y="463" width="0.3" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.85" y="473.5" ></text>
+</g>
+<g >
+<title>TClass::BuildRealData (12 samples, 0.022%)</title><rect x="13.9" y="495" width="0.3" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.85" y="505.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::ReadAST (4 samples, 0.007%)</title><rect x="13.0" y="399" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.98" y="409.5" ></text>
+</g>
+<g >
+<title>clang::Preprocessor::HandleDirective (5 samples, 0.009%)</title><rect x="12.7" y="447" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.66" y="457.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::finishPendingActions (5 samples, 0.009%)</title><rect x="13.5" y="47" width="0.2" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="16.52" y="57.5" ></text>
+</g>
+<g >
+<title>[unknown] (15 samples, 0.027%)</title><rect x="10.2" y="751" width="0.4" height="15.0" fill="rgb(243,112,112)" rx="2" ry="2" />
+<text  x="13.22" y="761.5" ></text>
+</g>
+<g >
+<title>clang::HeaderSearch::loadModuleMapFile (4 samples, 0.007%)</title><rect x="12.9" y="543" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.87" y="553.5" ></text>
+</g>
+<g >
+<title>clang::DeclContext::decls_begin (7 samples, 0.013%)</title><rect x="13.5" y="111" width="0.2" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="16.47" y="121.5" ></text>
+</g>
+<g >
+<title>TBufferFile::ReadClassBuffer (13 samples, 0.024%)</title><rect x="13.4" y="415" width="0.4" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="16.42" y="425.5" ></text>
+</g>
+<g >
+<title>clang::ModuleMapParser::parseModuleDecl (4 samples, 0.007%)</title><rect x="12.9" y="463" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.87" y="473.5" ></text>
+</g>
+<g >
+<title>ClingMemberIterInternal::DCIter::DCIter (7 samples, 0.013%)</title><rect x="13.5" y="127" width="0.2" height="15.0" fill="rgb(198,198,58)" rx="2" ry="2" />
+<text  x="16.47" y="137.5" ></text>
+</g>
+<g >
+<title>[unknown] (15 samples, 0.027%)</title><rect x="10.2" y="735" width="0.4" height="15.0" fill="rgb(243,112,112)" rx="2" ry="2" />
+<text  x="13.22" y="745.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RColumnReaderBase::Get&lt;unsigned long long&gt; (6 samples, 0.011%)</title><rect x="14.9" y="527" width="0.2" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="17.93" y="537.5" ></text>
+</g>
+<g >
+<title>TClingDataMemberInfo::TClingDataMemberInfo (4 samples, 0.007%)</title><rect x="13.9" y="239" width="0.1" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.85" y="249.5" ></text>
+</g>
+<g >
+<title>__memset_avx2_unaligned_erms (6 samples, 0.011%)</title><rect x="11.3" y="479" width="0.2" height="15.0" fill="rgb(236,102,102)" rx="2" ry="2" />
+<text  x="14.30" y="489.5" ></text>
+</g>
+<g >
+<title>TClass::GetClass (122 samples, 0.224%)</title><rect x="11.1" y="671" width="3.3" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="14.06" y="681.5" ></text>
+</g>
+<g >
+<title>TCling::RegisterModule (37 samples, 0.068%)</title><rect x="13.4" y="623" width="1.0" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.36" y="633.5" ></text>
+</g>
+<g >
+<title>_start (4 samples, 0.007%)</title><rect x="1488.8" y="767" width="0.1" height="15.0" fill="rgb(233,98,98)" rx="2" ry="2" />
+<text  x="1491.83" y="777.5" ></text>
+</g>
+<g >
+<title>clang::Preprocessor::HandleIdentifier (4 samples, 0.007%)</title><rect x="12.7" y="335" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.68" y="345.5" ></text>
+</g>
+<g >
+<title>TBufferFile::ReadFastArray (15 samples, 0.027%)</title><rect x="13.4" y="447" width="0.4" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="16.42" y="457.5" ></text>
+</g>
+<g >
+<title>std::__uniq_ptr_impl&lt;ROOT::Detail::RDF::RColumnReaderBase, std::default_delete&lt;ROOT::Detail::RDF::RColumnReaderBase&gt; &gt;::_M_ptr (4 samples, 0.007%)</title><rect x="1487.7" y="495" width="0.1" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="1490.72" y="505.5" ></text>
+</g>
+<g >
+<title>clang::CompilerInstance::loadModule (4 samples, 0.007%)</title><rect x="13.0" y="415" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.98" y="425.5" ></text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RLoopManager::Run (54,360 samples, 99.586%)</title><rect x="14.4" y="671" width="1473.8" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="17.37" y="681.5" >ROOT::Detail::RDF::RLoopManager::Run</text>
+</g>
+<g >
+<title>cling::IncrementalParser::ParseInternal (6 samples, 0.011%)</title><rect x="12.6" y="527" width="0.2" height="15.0" fill="rgb(194,194,57)" rx="2" ry="2" />
+<text  x="15.63" y="537.5" ></text>
+</g>
+<g >
+<title>[unknown] (31 samples, 0.057%)</title><rect x="10.2" y="767" width="0.9" height="15.0" fill="rgb(243,112,112)" rx="2" ry="2" />
+<text  x="13.22" y="777.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::TypeID2TypeName[abi:cxx11] (122 samples, 0.224%)</title><rect x="11.1" y="687" width="3.3" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="14.06" y="697.5" ></text>
+</g>
+<g >
+<title>ClingMemberIterInternal::DCIter::DCIter (4 samples, 0.007%)</title><rect x="13.9" y="223" width="0.1" height="15.0" fill="rgb(198,198,58)" rx="2" ry="2" />
+<text  x="16.85" y="233.5" ></text>
+</g>
+<g >
+<title>TClass::CallShowMembers (12 samples, 0.022%)</title><rect x="13.9" y="479" width="0.3" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.85" y="489.5" ></text>
+</g>
+<g >
+<title>TClass::GetDataMember (4 samples, 0.007%)</title><rect x="13.9" y="303" width="0.1" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.85" y="313.5" ></text>
+</g>
+<g >
+<title>clang::Preprocessor::HandleIfdefDirective (4 samples, 0.007%)</title><rect x="12.7" y="431" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.68" y="441.5" ></text>
+</g>
+<g >
+<title>TCling::LoadPCM (37 samples, 0.068%)</title><rect x="13.4" y="607" width="1.0" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.36" y="617.5" ></text>
+</g>
+<g >
+<title>_dl_relocate_object (8 samples, 0.015%)</title><rect x="1488.6" y="719" width="0.2" height="15.0" fill="rgb(244,114,114)" rx="2" ry="2" />
+<text  x="1491.59" y="729.5" ></text>
+</g>
+<g >
+<title>TCling::InspectMembers (4 samples, 0.007%)</title><rect x="13.9" y="335" width="0.1" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.85" y="345.5" ></text>
+</g>
+<g >
+<title>call_init (5 samples, 0.009%)</title><rect x="1489.1" y="767" width="0.1" height="15.0" fill="rgb(226,89,89)" rx="2" ry="2" />
+<text  x="1492.05" y="777.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::ReadControlBlock (7 samples, 0.013%)</title><rect x="11.9" y="447" width="0.2" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="14.90" y="457.5" ></text>
+</g>
+<g >
+<title>TBuildRealData::Inspect (11 samples, 0.020%)</title><rect x="13.4" y="319" width="0.3" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="16.44" y="329.5" ></text>
+</g>
+<g >
+<title>TListOfDataMembers::Load (7 samples, 0.013%)</title><rect x="13.5" y="175" width="0.2" height="15.0" fill="rgb(203,203,60)" rx="2" ry="2" />
+<text  x="16.47" y="185.5" ></text>
+</g>
+<g >
+<title>TKey::ReadObjectAny (31 samples, 0.057%)</title><rect x="13.4" y="559" width="0.8" height="15.0" fill="rgb(207,207,61)" rx="2" ry="2" />
+<text  x="16.39" y="569.5" ></text>
+</g>
+<g >
+<title>std::unique_ptr&lt;ROOT::Detail::RDF::RColumnReaderBase, std::default_delete&lt;ROOT::Detail::RDF::RColumnReaderBase&gt; &gt;::get (4 samples, 0.007%)</title><rect x="1488.0" y="575" width="0.2" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="1491.05" y="585.5" ></text>
+</g>
+<g >
+<title>clone3 (5 samples, 0.009%)</title><rect x="1488.4" y="751" width="0.2" height="15.0" fill="rgb(224,85,85)" rx="2" ry="2" />
+<text  x="1491.43" y="761.5" ></text>
+</g>
+<g >
+<title>TClass::BuildRealData (4 samples, 0.007%)</title><rect x="13.9" y="367" width="0.1" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.85" y="377.5" ></text>
+</g>
+<g >
+<title>clang::Parser::ParseTopLevelDecl (6 samples, 0.011%)</title><rect x="12.6" y="511" width="0.2" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.63" y="521.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::ReadASTCore (7 samples, 0.013%)</title><rect x="11.9" y="463" width="0.2" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="14.90" y="473.5" ></text>
+</g>
+<g >
+<title>clang::Preprocessor::HandleDirective (4 samples, 0.007%)</title><rect x="13.0" y="463" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.98" y="473.5" ></text>
+</g>
+<g >
+<title>clone3 (8 samples, 0.015%)</title><rect x="10.8" y="751" width="0.2" height="15.0" fill="rgb(224,85,85)" rx="2" ry="2" />
+<text  x="13.79" y="761.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RDefineReader::GetImpl (54,333 samples, 99.537%)</title><rect x="14.8" y="575" width="1473.1" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="17.80" y="585.5" >ROOT::Internal::RDF::RDefineReader::GetImpl</text>
+</g>
+<g >
+<title>TCling::InspectMembers (10 samples, 0.018%)</title><rect x="13.9" y="399" width="0.2" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.85" y="409.5" ></text>
+</g>
+<g >
+<title>clang::Preprocessor::Lex (4 samples, 0.007%)</title><rect x="12.7" y="399" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.68" y="409.5" ></text>
+</g>
+<g >
+<title>all (54,586 samples, 100.00%)</title><rect x="10.0" y="799" width="1480.0" height="15.0" fill="rgb(255,130,130)" rx="2" ry="2" />
+<text  x="13.00" y="809.5" ></text>
+</g>
+<g >
+<title>_dl_sysdep_start (8 samples, 0.015%)</title><rect x="1488.6" y="751" width="0.2" height="15.0" fill="rgb(244,114,114)" rx="2" ry="2" />
+<text  x="1491.59" y="761.5" ></text>
+</g>
+<g >
+<title>clang::Sema::ActOnModuleImport (54 samples, 0.099%)</title><rect x="11.1" y="543" width="1.5" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="14.14" y="553.5" ></text>
+</g>
+<g >
+<title>RegisterPreIncludedHeaders (6 samples, 0.011%)</title><rect x="12.6" y="591" width="0.2" height="15.0" fill="rgb(243,113,113)" rx="2" ry="2" />
+<text  x="15.63" y="601.5" ></text>
+</g>
+<g >
+<title>clang::HeaderSearch::loadModuleMapFileImpl (4 samples, 0.007%)</title><rect x="12.9" y="527" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.87" y="537.5" ></text>
+</g>
+<g >
+<title>__libc_start_call_main (54,482 samples, 99.809%)</title><rect x="11.1" y="767" width="1477.1" height="15.0" fill="rgb(236,103,103)" rx="2" ry="2" />
+<text  x="14.06" y="777.5" >__libc_start_call_main</text>
+</g>
+<g >
+<title>TBufferFile::ReadObjectAny (30 samples, 0.055%)</title><rect x="13.4" y="527" width="0.8" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="16.42" y="537.5" ></text>
+</g>
+<g >
+<title>clang::Preprocessor::ReadMacroName (4 samples, 0.007%)</title><rect x="12.7" y="415" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.68" y="425.5" ></text>
+</g>
+<g >
+<title>ROOT::RDF::RResultPtr&lt;double&gt;::TriggerRun (54,360 samples, 99.586%)</title><rect x="14.4" y="687" width="1473.8" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="17.37" y="697.5" >ROOT::RDF::RResultPtr&lt;double&gt;::TriggerRun</text>
+</g>
+<g >
+<title>clang::ASTReader::ReadAST (51 samples, 0.093%)</title><rect x="11.1" y="511" width="1.4" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="14.14" y="521.5" ></text>
+</g>
+<g >
+<title>ROOT::Internal::RDF::RAction&lt;ROOT::Internal::RDF::SumHelper&lt;double&gt;, ROOT::Detail::RDF::RLoopManager, ROOT::TypeTraits::TypeList&lt;double&gt; &gt;::CallExec&lt;double, 0ul&gt; (54,352 samples, 99.571%)</title><rect x="14.5" y="607" width="1473.7" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="17.50" y="617.5" >ROOT::Internal::RDF::RAction&lt;ROOT::Internal::RDF::SumHelper&lt;double&gt;, ROOT::Detail::RDF::RLoopManager, ROOT::TypeTraits::TypeList&lt;double&gt; &gt;::CallExec&lt;double, 0ul&gt;</text>
+</g>
+<g >
+<title>TCling::LoadPCMImpl (32 samples, 0.059%)</title><rect x="13.4" y="591" width="0.8" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.36" y="601.5" ></text>
+</g>
+<g >
+<title>LoadModule (56 samples, 0.103%)</title><rect x="11.1" y="575" width="1.5" height="15.0" fill="rgb(241,110,110)" rx="2" ry="2" />
+<text  x="14.08" y="585.5" ></text>
+</g>
+<g >
+<title>TCling::InspectMembers (12 samples, 0.022%)</title><rect x="13.4" y="367" width="0.4" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.44" y="377.5" ></text>
+</g>
+<g >
+<title>clang::Lexer::Lex (4 samples, 0.007%)</title><rect x="12.7" y="383" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.68" y="393.5" ></text>
+</g>
+<g >
+<title>ROOT::RDF::RInterface&lt;ROOT::Detail::RDF::RLoopManager, void&gt;::Define&lt;double (*)(unsigned long long), 0&gt; (122 samples, 0.224%)</title><rect x="11.1" y="719" width="3.3" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="14.06" y="729.5" ></text>
+</g>
+<g >
+<title>TClass::CallShowMembers (10 samples, 0.018%)</title><rect x="13.4" y="287" width="0.3" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.44" y="297.5" ></text>
+</g>
+<g >
+<title>sh (13 samples, 0.024%)</title><rect x="1489.6" y="783" width="0.4" height="15.0" fill="rgb(236,103,103)" rx="2" ry="2" />
+<text  x="1492.65" y="793.5" ></text>
+</g>
+<g >
+<title>clang::ASTReader::getInputFile (6 samples, 0.011%)</title><rect x="12.2" y="463" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.17" y="473.5" ></text>
+</g>
+<g >
+<title>rdf-sin (54,568 samples, 99.967%)</title><rect x="10.1" y="783" width="1479.5" height="15.0" fill="rgb(241,110,110)" rx="2" ry="2" />
+<text  x="13.11" y="793.5" >rdf-sin</text>
+</g>
+<g >
+<title>ROOT::Detail::RDF::RColumnReaderBase::Get&lt;double&gt; (54,340 samples, 99.549%)</title><rect x="14.6" y="591" width="1473.3" height="15.0" fill="rgb(218,218,65)" rx="2" ry="2" />
+<text  x="17.61" y="601.5" >ROOT::Detail::RDF::RColumnReaderBase::Get&lt;double&gt;</text>
+</g>
+<g >
+<title>TCling::TCling (82 samples, 0.150%)</title><rect x="11.1" y="607" width="2.2" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="14.06" y="617.5" ></text>
+</g>
+<g >
+<title>dl_main (8 samples, 0.015%)</title><rect x="1488.6" y="735" width="0.2" height="15.0" fill="rgb(235,101,101)" rx="2" ry="2" />
+<text  x="1491.59" y="745.5" ></text>
+</g>
+<g >
+<title>TListOfDataMembers::Load (4 samples, 0.007%)</title><rect x="13.9" y="271" width="0.1" height="15.0" fill="rgb(203,203,60)" rx="2" ry="2" />
+<text  x="16.85" y="281.5" ></text>
+</g>
+<g >
+<title>clang::Preprocessor::HandleHeaderIncludeOrImport (4 samples, 0.007%)</title><rect x="13.0" y="431" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.98" y="441.5" ></text>
+</g>
+<g >
+<title>TBufferFile::ReadObjectAny (15 samples, 0.027%)</title><rect x="13.4" y="431" width="0.4" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="16.42" y="441.5" ></text>
+</g>
+<g >
+<title>TDirectoryFile::GetObjectChecked (32 samples, 0.059%)</title><rect x="13.4" y="575" width="0.8" height="15.0" fill="rgb(213,213,63)" rx="2" ry="2" />
+<text  x="16.36" y="585.5" ></text>
+</g>
+<g >
+<title>TBufferFile::ApplySequence (16 samples, 0.029%)</title><rect x="13.4" y="495" width="0.5" height="15.0" fill="rgb(215,215,64)" rx="2" ry="2" />
+<text  x="16.42" y="505.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;clang::QualType, std::allocator&lt;clang::QualType&gt; &gt;::_M_default_append (4 samples, 0.007%)</title><rect x="11.8" y="479" width="0.1" height="15.0" fill="rgb(210,210,62)" rx="2" ry="2" />
+<text  x="14.79" y="489.5" ></text>
+</g>
+<g >
+<title>CreateInterpreter (82 samples, 0.150%)</title><rect x="11.1" y="623" width="2.2" height="15.0" fill="rgb(232,97,97)" rx="2" ry="2" />
+<text  x="14.06" y="633.5" ></text>
+</g>
+<g >
+<title>clang::DeclContext::LoadLexicalDeclsFromExternalStorage (7 samples, 0.013%)</title><rect x="13.5" y="95" width="0.2" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="16.47" y="105.5" ></text>
+</g>
+<g >
+<title>TClass::CreateListOfDataMembers (4 samples, 0.007%)</title><rect x="13.9" y="287" width="0.1" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.85" y="297.5" ></text>
+</g>
+<g >
+<title>clang::Preprocessor::HandleIncludeDirective (4 samples, 0.007%)</title><rect x="13.0" y="447" width="0.1" height="15.0" fill="rgb(201,201,59)" rx="2" ry="2" />
+<text  x="15.98" y="457.5" ></text>
+</g>
+<g >
+<title>TCling::InspectMembers (10 samples, 0.018%)</title><rect x="13.4" y="271" width="0.3" height="15.0" fill="rgb(221,221,66)" rx="2" ry="2" />
+<text  x="16.44" y="281.5" ></text>
+</g>
+</g>
+</svg>
