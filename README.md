@@ -225,4 +225,7 @@ As an example, in `Python/Double-define-explicit-wt/`, the time-wasting loop is 
 
 3. Jitted functions declared to the interpreter are wrapped by a c++ lambda. Even if, as in *1.*, the symbol for such wrapper is lost, the signature on the templates remains the one of the wrapper.
 
-    **Example:** In `Python/Realistic/Original/df105_WBosonAnalysis.py`, the function `GoodElectronOrMuon` has been declared to the interpreter, but is still wrapped before being called. When called, it has all its inputs as column names, hence the signature is the same as the wrapper. However if we fix one of the inputs, the wrapper will drop that input, and the two signatures will be different. In the templates then, we always see the *signature of the wrapper*, which in general can be different than the user-defined function.
+    **Example:** In `Python/Realistic/Double-define-explicit-wt-signatures/rdf-nomath.py`, the functions `calc_x_with_options` and `calc_y_with_options` have been declared to the interpreter, but are still wrapped before being called. When called, if we fix one or more of the paramenters to constants, the wrapper will drop the respective input, and the two signatures will be different. In the templates then, we always see the *signature of the wrapper*, which in general can be different than the user-defined function.
+    
+    ![](Python/Double-define-explicit-wt-signature/Graphs/flamegraph.svg "python signature flamegraph")
+    
